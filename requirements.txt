@@ -1,0 +1,7 @@
+aiohttp
+anyio
+beautifulsoup4
+lxml
+markdownify
+orjson
+yarl
