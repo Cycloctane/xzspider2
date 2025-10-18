@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 import anyio
 import orjson
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from aiohttp import ClientSession, ClientTimeout
 from bs4 import BeautifulSoup, Tag
 from bs4.element import AttributeValueList
 from bs4.filter import SoupStrainer
@@ -61,7 +61,7 @@ class XZSpider:
         ignore_exists: bool = False,
         limit: int = 8,
         page_limit: int = 4,
-        timeout: int = 45,
+        timeout: int = 60,
     ) -> None:
         self.save_path = Path(save_path)
         self.ignore_exists = ignore_exists
@@ -69,12 +69,12 @@ class XZSpider:
         self._client = ClientSession(
             base_url=BASE_URL,
             headers={"User-Agent": UA, "Referer": "https://xz.aliyun.com/"},
-            connector=TCPConnector(limit_per_host=16, limit=64),
             timeout=ClientTimeout(total=timeout),
             read_bufsize=2**22,  # 4MB
         )
         self._page_sem = asyncio.Semaphore(page_limit)
         self._news_sem = asyncio.Semaphore(limit)
+        self._image_sem = asyncio.Semaphore(limit * 8)
         self._cookie_proc_lock = asyncio.Lock()
         self._cookie_proc: asyncio.subprocess.Process | None = None
         self.fetched_index: dict[int, str] = {}
@@ -141,13 +141,14 @@ class XZSpider:
     async def _get_remote_image(
         self, url: URL, title: str, soup: BeautifulSoup, element: Tag
     ) -> None:
-        async with self._client.get(url, headers={"Accept": "image/*"}) as resp:
+        async with self._image_sem, self._client.get(url, headers={"Accept": "image/*"}) as resp:
             if not resp.ok:
                 element.decompose()
                 resp.raise_for_status()
                 return
 
-            ext = IMAGE_MIME.get(resp.content_type) or splitext(url.path)[1].lower()
+            ext = IMAGE_MIME.get(resp.content_type) \
+                or splitext(url.path.removesuffix("!post").removesuffix("!thumbnail"))[1].lower()
             if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".svg"}:
                 element.decompose()
                 raise ValueError("Cannot determine image format for " + str(url))
@@ -163,28 +164,30 @@ class XZSpider:
         if not (m := IMAGE_DATA_RE.match(data)) or not (ext := IMAGE_MIME.get(m.group(1))):
             element.decompose()
             raise ValueError("Cannot determine image format for embedded image")
-        try:
-            raw_data = binascii.a2b_base64(data[m.end():], strict_mode=True)
-        except binascii.Error:
-            element.decompose()
-            raise ValueError("Invalid base64 data for embedded image")
-        src = "img/" + sha256(raw_data).hexdigest() + ext
-        element.replace_with(soup.new_tag("img", src=src, alt="embedded image"))
-        async with await anyio.open_file(self.save_path / title / src, "wb") as f:
-            await f.write(raw_data)
+
+        async with self._image_sem:
+            try:
+                raw_data = binascii.a2b_base64(data[m.end():], strict_mode=True)
+            except binascii.Error:
+                element.decompose()
+                raise ValueError("Invalid base64 data for embedded image")
+            src = "img/" + sha256(raw_data).hexdigest() + ext
+            element.replace_with(soup.new_tag("img", src=src, alt="embedded image"))
+            async with await anyio.open_file(self.save_path / title / src, "wb") as f:
+                await f.write(raw_data)
 
     async def _make_article_req(
         self, idx: int, *, retry: bool = False
     ) -> dict[str, str] | None:
         async with self._client.get(str(idx)) as resp:
             if resp.status != 200 or "Set-Cookie" not in resp.headers:
-                logger.critical(f"Rate limit exceeded or blocked when fetching article {idx}")
+                logger.warning(f"Rate limit exceeded or blocked when fetching article {idx}")
                 return
 
             first_line = await resp.content.readline()
             if m := ARG1_RE.match(first_line):
                 if not retry:
-                    logger.critical(f"Failed to fetch article {idx} - invalid cookies")
+                    logger.warning(f"Failed to fetch article {idx} - invalid cookies")
                     return
                 await self._update_cookie(m.group(1).decode())
                 return await self._make_article_req(idx, retry=False)
@@ -201,10 +204,10 @@ class XZSpider:
                     return json_obj
         logger.warning(f"Failed to fetch article {idx} - invalid response")
 
-    async def _fetch_article(self, idx: int):
+    async def _fetch_article(self, idx: int) -> bool:
         json_obj = await self._make_article_req(idx, retry=True)
         if not json_obj:
-            return
+            return False
 
         title = str(idx) + "." + \
             json_obj['title'].translate(str.maketrans({c: "_" for c in "\\/:*?\"'<>| "}))
@@ -231,7 +234,7 @@ class XZSpider:
             if isinstance(value, AttributeValueList):
                 value = value[0]
             try:
-                src = orjson.loads(unquote(value.lstrip("data:")))["src"]
+                src = orjson.loads(unquote(value.removeprefix("data:")))["src"]
             except (orjson.JSONDecodeError, TypeError, KeyError):
                 element.decompose()
                 continue
@@ -247,7 +250,7 @@ class XZSpider:
             if isinstance(value, AttributeValueList):
                 value = value[0]
             try:
-                code: str = orjson.loads(unquote(value.lstrip("data:")))["code"]
+                code: str = orjson.loads(unquote(value.removeprefix("data:")))["code"]
             except (orjson.JSONDecodeError, TypeError, KeyError):
                 element.decompose()
             else:
@@ -263,10 +266,11 @@ class XZSpider:
         ) as f:
             await f.write(self._md.convert_soup(soup))
         self.fetched_index[idx] = json_obj["title"]
+        return True
 
-    async def fetch_article(self, idx: int) -> None:
+    async def fetch_article(self, idx: int) -> bool:
         async with self._news_sem:
-            await self._fetch_article(idx)
+            return await self._fetch_article(idx)
 
     async def fetch_page_links(self, page: int) -> set[int]:
         async with self._client.get(
@@ -297,10 +301,10 @@ class XZSpider:
                 self.fetch_article(i) for i in links
                 if self.ignore_exists or i not in self.fetched_index
             )
-            await asyncio.gather(*tasks)
+            res = await asyncio.gather(*tasks)
             logger.info(
-                f"Finished page {page} "
-                f"({len(links)} articles, {len(links) - len(tasks)} skipped)"
+                f"Finished page {page}: {len(links)} total, "
+                f"{sum(1 for i in res if i)} downloaded, {len(links) - len(tasks)} skipped"
             )
 
 
