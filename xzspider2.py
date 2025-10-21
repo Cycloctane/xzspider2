@@ -92,6 +92,7 @@ class XZSpider:
 
     async def _terminate_cookie_proc(self) -> None:
         if self._cookie_proc is not None:
+            logger.warning(f"Terminating cookie generator (pid {self._cookie_proc.pid})...")
             if self._cookie_proc.stdin is not None:
                 self._cookie_proc.stdin.close()
             self._cookie_proc.terminate()
@@ -114,6 +115,7 @@ class XZSpider:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                 )
+                logger.info(f"Cookie generator started. pid {self._cookie_proc.pid}")
 
             self._cookie_proc.stdin.write((arg1 + "\n").encode())
             await self._cookie_proc.stdin.drain()
@@ -162,7 +164,7 @@ class XZSpider:
                     or IMAGE_MIME.get(magic.from_buffer(data, mime=True))
             if not ext:
                 element.decompose()
-                raise ValueError("Cannot determine image format for " + str(url))
+                raise ValueError("Cannot determine image format of " + str(url))
 
             src = "img/" + sha256(str(url).encode()).hexdigest() + ext
             element.replace_with(soup.new_tag("img", src=src, alt=str(url)))
@@ -197,7 +199,7 @@ class XZSpider:
             body = await resp.read()
             if m := ARG1_RE.match(body):
                 if not retry:
-                    logger.warning(f"Failed to fetch article {idx} - invalid cookies")
+                    logger.error(f"Failed to fetch article {idx} - invalid cookies")
                     return
                 await self._update_cookie(m.group(1).decode())
                 return await self._make_article_req(idx, retry=False)
@@ -206,7 +208,7 @@ class XZSpider:
             if json_obj["content"] and json_obj["title"]:
                 return json_obj
         except (orjson.JSONDecodeError, TypeError, KeyError):
-            logger.warning(f"Failed to fetch article {idx} - invalid response")
+            logger.error(f"Failed to fetch article {idx} - invalid response")
 
     async def _fetch_article(self, idx: int) -> bool:
         json_obj = await self._make_article_req(idx, retry=True)
@@ -263,7 +265,7 @@ class XZSpider:
         errors = await asyncio.gather(*tasks, return_exceptions=True)
         for e in errors:
             if e:
-                logger.warning(f"Failed to fetch image for {title}: {str(e)}")
+                logger.warning(f"Cannot download image in {title}: {str(e)}")
 
         async with await anyio.open_file(
             self.save_path / title / (title + ".md"), "w", encoding="utf-8"
@@ -283,7 +285,7 @@ class XZSpider:
                 json_obj = await resp.json(loads=orjson.loads)
                 return set(int(item["id"]) for item in json_obj)
             except (ClientResponseError, orjson.JSONDecodeError, TypeError, KeyError):
-                logger.warning(f"Failed to fetch page {page} - invalid response")
+                logger.error(f"Failed to fetch page {page} - invalid response")
 
     async def fetch_page(self, page: int) -> None:
         async with self._page_sem:
@@ -297,7 +299,7 @@ class XZSpider:
             )
             res = await asyncio.gather(*tasks)
         logger.info(
-            f"Fetched page {page}: {len(links)} total, {sum(1 for i in res if i)} downloaded, "
+            f"Page {page}: {len(links)} total, {sum(1 for i in res if i)} downloaded, "
             f"{sum(1 for i in res if not i)} failed, {len(links) - len(res)} skipped"
         )
 
