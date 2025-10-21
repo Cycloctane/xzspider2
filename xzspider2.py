@@ -69,12 +69,12 @@ class XZSpider:
         self._client = ClientSession(
             base_url=BASE_URL,
             headers={"User-Agent": UA, "Referer": "https://xz.aliyun.com/"},
-            timeout=ClientTimeout(total=timeout),
+            timeout=ClientTimeout(connect=timeout),
             read_bufsize=2**22,  # 4MB
         )
         self._page_sem = asyncio.Semaphore(page_limit)
         self._news_sem = asyncio.Semaphore(limit)
-        self._image_sem = asyncio.Semaphore(limit * 8)
+        self._image_sem = asyncio.Semaphore(limit * 4)
         self._cookie_proc_lock = asyncio.Lock()
         self._cookie_proc: asyncio.subprocess.Process | None = None
         self.fetched_index: dict[int, str] = {}
