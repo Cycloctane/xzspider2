@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import anyio
+import magic
 import orjson
 from aiohttp import ClientSession, ClientTimeout
 from bs4 import BeautifulSoup, Tag
@@ -141,22 +142,35 @@ class XZSpider:
     async def _get_remote_image(
         self, url: URL, title: str, soup: BeautifulSoup, element: Tag
     ) -> None:
-        async with self._image_sem, self._client.get(url, headers={"Accept": "image/*"}) as resp:
+        if url.host == "xianzhi.aliyuncs.com":
+            url = url.with_host("xzfile.aliyuncs.com")
+        elif re.match(r"w[wsx](\d+)\.sinaimg\.cn", url.host):
+            url = url.with_host("tva1.sinaimg.cn")
+        referer = {
+            "sinaimg.cn": "https://weibo.com/", "jianshu.io": "https://www.jianshu.com/",
+            "csdnimg.cn": "https://blog.csdn.net/", "cnblogs.com": "https://www.cnblogs.com/",
+            "gitee.com": "https://gitee.com/", "52pojie.cn": "https://www.52pojie.cn/",
+        }.get(".".join(url.host.rsplit(".", 2)[-2:]), "https://xz.aliyun.com/")
+
+        async with self._image_sem, self._client.get(url, headers={"Accept": "image/*", "Referer": referer}) as resp:
             if not resp.ok:
                 element.decompose()
                 resp.raise_for_status()
                 return
 
-            ext = IMAGE_MIME.get(resp.content_type) \
-                or splitext(url.path.removesuffix("!post").removesuffix("!thumbnail"))[1].lower()
+            data = await resp.read()
+            ext = splitext(url.path.removesuffix("!post").removesuffix("!thumbnail"))[1].lower()
             if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".svg"}:
+                ext = IMAGE_MIME.get(resp.content_type) \
+                    or IMAGE_MIME.get(magic.from_buffer(data, mime=True))
+            if not ext:
                 element.decompose()
                 raise ValueError("Cannot determine image format for " + str(url))
 
             src = "img/" + sha256(str(url).encode()).hexdigest() + ext
             element.replace_with(soup.new_tag("img", src=src, alt=str(url)))
             async with await anyio.open_file(self.save_path / title / src, "wb") as f:
-                await f.write(await resp.read())
+                await f.write(data)
 
     async def _save_embedded_image(
         self, data: str, title: str, soup: BeautifulSoup, element: Tag
