@@ -14,20 +14,17 @@ from urllib.parse import unquote
 import anyio
 import magic
 import orjson
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 from bs4 import BeautifulSoup, Tag
 from bs4.element import AttributeValueList
-from bs4.filter import SoupStrainer
 from markdownify import MarkdownConverter
 from yarl import URL
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0"
-BASE_URL = URL("https://xz.aliyun.com/news/")
+BASE_URL = URL("https://xz.aliyun.com/api/v2/news/")
 
-NEWS_CONTENT_RE = re.compile(rb"^\s+let newsDetail=")
-NEWS_LINK_RE = re.compile(r"^https://xz\.aliyun\.com/news/(\d+)")
 IMAGE_DATA_RE = re.compile(r"^data:(image/[a-z]{3,4});base64,")
 ARG1_RE = re.compile(rb"^<textarea id=\"renderData\" style=\"display:none\">{\"l1\":\"var arg1='([\da-f]{50})';\"}")
 IMAGE_MIME = {
@@ -60,22 +57,19 @@ class XZSpider:
         save_path: str,
         index_file: str | None = None,
         ignore_exists: bool = False,
-        limit: int = 8,
-        page_limit: int = 4,
-        timeout: int = 60,
+        limit: int = 3,
+        page_limit: int = 2,
+        timeout: int = 20,
     ) -> None:
         self.save_path = Path(save_path)
         self.ignore_exists = ignore_exists
         self._md = MarkdownConverter()
         self._client = ClientSession(
-            base_url=BASE_URL,
-            headers={"User-Agent": UA, "Referer": "https://xz.aliyun.com/"},
-            timeout=ClientTimeout(connect=timeout),
-            read_bufsize=2**22,  # 4MB
+            base_url=BASE_URL, headers={"User-Agent": UA}, timeout=ClientTimeout(connect=timeout)
         )
         self._page_sem = asyncio.Semaphore(page_limit)
         self._news_sem = asyncio.Semaphore(limit)
-        self._image_sem = asyncio.Semaphore(limit * 4)
+        self._image_sem = asyncio.Semaphore(limit * 8)
         self._cookie_proc_lock = asyncio.Lock()
         self._cookie_proc: asyncio.subprocess.Process | None = None
         self.fetched_index: dict[int, str] = {}
@@ -88,7 +82,10 @@ class XZSpider:
         with open(index_path or self.save_path / "index.json", "wb") as f:
             f.write(
                 orjson.dumps(
-                    {str(k): self.fetched_index[k] for k in sorted(self.fetched_index)},
+                    {
+                        str(k): self.fetched_index[k]
+                        for k in sorted(self.fetched_index, reverse=True)
+                    },
                     option=orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE
                 )
             )
@@ -197,26 +194,19 @@ class XZSpider:
             if resp.status != 200 or "Set-Cookie" not in resp.headers:
                 logger.warning(f"Rate limit exceeded or blocked when fetching article {idx}")
                 return
-
-            first_line = await resp.content.readline()
-            if m := ARG1_RE.match(first_line):
+            body = await resp.read()
+            if m := ARG1_RE.match(body):
                 if not retry:
                     logger.warning(f"Failed to fetch article {idx} - invalid cookies")
                     return
                 await self._update_cookie(m.group(1).decode())
                 return await self._make_article_req(idx, retry=False)
-
-            while not resp.content.at_eof():
-                line = await resp.content.readline()
-                if m := NEWS_CONTENT_RE.match(line):
-                    try:
-                        json_obj = orjson.loads(line[m.end():-2])  # let newsDetail={...};\n
-                    except orjson.JSONDecodeError:
-                        break
-                    if not json_obj or len({"content", "title"} & json_obj.keys()) != 2:
-                        break
-                    return json_obj
-        logger.warning(f"Failed to fetch article {idx} - invalid response")
+        try:
+            json_obj = orjson.loads(body)
+            if json_obj["content"] and json_obj["title"]:
+                return json_obj
+        except (orjson.JSONDecodeError, TypeError, KeyError):
+            logger.warning(f"Failed to fetch article {idx} - invalid response")
 
     async def _fetch_article(self, idx: int) -> bool:
         json_obj = await self._make_article_req(idx, retry=True)
@@ -286,29 +276,19 @@ class XZSpider:
         async with self._news_sem:
             return await self._fetch_article(idx)
 
-    async def fetch_page_links(self, page: int) -> set[int]:
-        async with self._client.get(
-            "", raise_for_status=True,
-            params={
-                "isAjax": "true", "type": "category",
-                "category": 26, "cate_id": 0, "page": page,
-            },
-            headers={"X-Requested-With": "XMLHttpRequest"},
-        ) as resp:
-            json = await resp.json(loads=orjson.loads)
-        soup = BeautifulSoup(
-            json["data"], "lxml", parse_only=SoupStrainer("a", class_="news_title")
-        )
-        links: set[int] = set()
-        for a in soup.find_all("a", class_="news_title"):
-            if m := NEWS_LINK_RE.match(str(a.get("href", ""))):
-                links.add(int(m.group(1)))
-        return links
+    async def fetch_page_links(self, page: int) -> set[int] | None:
+        async with self._client.get("", params={"page": page}) as resp:
+            try:
+                resp.raise_for_status()
+                json_obj = await resp.json(loads=orjson.loads)
+                return set(int(item["id"]) for item in json_obj)
+            except (ClientResponseError, orjson.JSONDecodeError, TypeError, KeyError):
+                logger.warning(f"Failed to fetch page {page} - invalid response")
 
     async def fetch_page(self, page: int) -> None:
         async with self._page_sem:
             links = await self.fetch_page_links(page)
-            if len(links) == 0:
+            if not links or len(links) == 0:
                 logger.warning(f"No articles on page {page}")
                 return
             tasks = tuple(
@@ -316,10 +296,10 @@ class XZSpider:
                 if self.ignore_exists or i not in self.fetched_index
             )
             res = await asyncio.gather(*tasks)
-            logger.info(
-                f"Finished page {page}: {len(links)} total, "
-                f"{sum(1 for i in res if i)} downloaded, {len(links) - len(tasks)} skipped"
-            )
+        logger.info(
+            f"Fetched page {page}: {len(links)} total, {sum(1 for i in res if i)} downloaded, "
+            f"{sum(1 for i in res if not i)} failed, {len(links) - len(res)} skipped"
+        )
 
 
 def _parse_pages(value: str) -> set[int]:
@@ -353,10 +333,13 @@ async def main():
         help="Ignore existing items in index.json and re-download all articles"
     )
     parser.add_argument(
-        "--limit", type=int, default=8, help="Maximum concurrent scraping articles (default 8)"
+        "--limit", type=int, default=3, help="Maximum concurrent scraping articles (default 3)"
     )
     parser.add_argument(
-        "--page-limit", type=int, default=4, help="Maximum concurrent scraping pages (default 4)"
+        "--page-limit", type=int, default=2, help="Maximum concurrent scraping pages (default 2)"
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=20, help="Conntect timeout in seconds (default 20)"
     )
     ns = parser.parse_args()
     pages = _parse_pages(ns.pages)
@@ -366,6 +349,7 @@ async def main():
         limit=ns.limit,
         page_limit=ns.page_limit,
         ignore_exists=ns.ignore_exists,
+        timeout=ns.timeout,
     )
     try:
         await crawler.init_cookie()

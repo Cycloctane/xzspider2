@@ -12,4 +12,4 @@ Usage
 
     docker build -t xzspider2 .
     mkdir ./xzdocs
-    docker run --user=$(id --user):$(id --group) -v ./xzdocs:/opt/xzdocs/:rw --rm xzspider2 --pages 1,2,4-6
+    docker run --user=$(id --user):$(id --group) -v ./xzdocs:/opt/xzdocs/:rw --rm xzspider2 --pages 1-6
