@@ -151,17 +151,20 @@ class XZSpider:
             "gitee.com": "https://gitee.com/", "52pojie.cn": "https://www.52pojie.cn/",
         }.get(".".join(url.host.rsplit(".", 2)[-2:]), "https://xz.aliyun.com/")
 
-        async with self._image_sem, self._client.get(url, headers={"Accept": "image/*", "Referer": referer}) as resp:
-            if not resp.ok:
-                element.decompose()
-                resp.raise_for_status()
-                return
+        async with self._image_sem:
+            async with self._client.get(
+                url, headers={"Accept": "image/*", "Referer": referer}
+            ) as resp:
+                if not resp.ok:
+                    element.decompose()
+                    resp.raise_for_status()
+                    return
 
-            data = await resp.read()
-            ext = splitext(url.path.removesuffix("!post").removesuffix("!thumbnail"))[1].lower()
-            if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".svg"}:
-                ext = IMAGE_MIME.get(resp.content_type) \
-                    or IMAGE_MIME.get(magic.from_buffer(data, mime=True))
+                data = await resp.read()
+                ext = splitext(url.path.removesuffix("!post").removesuffix("!thumbnail"))[1].lower()
+                if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".svg"}:
+                    ext = IMAGE_MIME.get(resp.content_type) \
+                        or IMAGE_MIME.get(magic.from_buffer(data, mime=True))
             if not ext:
                 element.decompose()
                 raise ValueError("Cannot determine image format of " + str(url))
@@ -290,14 +293,15 @@ class XZSpider:
     async def fetch_page(self, page: int) -> None:
         async with self._page_sem:
             links = await self.fetch_page_links(page)
-            if not links or len(links) == 0:
+            if not links:
                 logger.warning(f"No articles on page {page}")
                 return
-            tasks = tuple(
-                self.fetch_article(i) for i in links
-                if self.ignore_exists or i not in self.fetched_index
+            res = await asyncio.gather(
+                *(
+                    self.fetch_article(i) for i in links
+                    if self.ignore_exists or i not in self.fetched_index
+                )
             )
-            res = await asyncio.gather(*tasks)
         logger.info(
             f"Page {page}: {len(links)} total, {sum(1 for i in res if i)} downloaded, "
             f"{sum(1 for i in res if not i)} failed, {len(links) - len(res)} skipped"
@@ -308,9 +312,7 @@ def _parse_pages(value: str) -> set[int]:
     pages: set[int] = set()
     for part in value.split(","):
         if "-" in part:
-            start_str, end_str = part.split("-", 1)
-            start = int(start_str)
-            end = int(end_str)
+            start, end = map(int, part.split("-", 1))
             pages.update(range(start, end + 1))
         else:
             pages.add(int(part))
@@ -341,7 +343,7 @@ async def main():
         "--page-limit", type=int, default=2, help="Maximum concurrent scraping pages (default 2)"
     )
     parser.add_argument(
-        "--timeout", type=int, default=20, help="Conntect timeout in seconds (default 20)"
+        "--timeout", type=int, default=20, help="Connect timeout in seconds (default 20)"
     )
     ns = parser.parse_args()
     pages = _parse_pages(ns.pages)
