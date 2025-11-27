@@ -171,8 +171,8 @@ class XZSpider:
                 raise ValueError("Cannot determine image format of " + str(url))
 
             src = "img/" + sha256(str(url).encode()).hexdigest() + ext
+            element.replace_with(soup.new_tag("img", src=src, alt=str(url)))
             if not os.path.exists(self.save_path / title / src):
-                element.replace_with(soup.new_tag("img", src=src, alt=str(url)))
                 async with await anyio.open_file(self.save_path / title / src, "wb") as f:
                     await f.write(data)
 
@@ -190,8 +190,8 @@ class XZSpider:
                 element.decompose()
                 raise ValueError("Invalid base64 data for embedded image")
             src = "img/" + sha256(raw_data).hexdigest() + ext
+            element.replace_with(soup.new_tag("img", src=src, alt="embedded image"))
             if not os.path.exists(self.save_path / title / src):
-                element.replace_with(soup.new_tag("img", src=src, alt="embedded image"))
                 async with await anyio.open_file(self.save_path / title / src, "wb") as f:
                     await f.write(raw_data)
 
