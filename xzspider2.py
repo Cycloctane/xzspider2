@@ -242,6 +242,8 @@ class XZSpider:
                 element.decompose()
 
         for element in soup.select('card[name="image"][value]'):
+            if element.decomposed:
+                continue
             value = element["value"]
             if isinstance(value, AttributeValueList):
                 value = value[0]
@@ -258,6 +260,8 @@ class XZSpider:
                 element.decompose()
 
         for element in soup.select('card[name="codeblock"][value]'):
+            if element.decomposed:
+                continue
             value = element["value"]
             if isinstance(value, AttributeValueList):
                 value = value[0]
