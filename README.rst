@@ -1,15 +1,11 @@
 xzspider2
 =========
 
-新的阿里云先知社区爬虫。附带docker。
+新的阿里云先知社区爬虫。
 
 Usage
 -----
 
-用docker。
-
 .. code-block:: bash
 
-    docker build -t xzspider2 .
-    mkdir ./xzdocs
-    docker run --user=$(id --user):$(id --group) -v ./xzdocs:/opt/xzdocs/:rw --rm xzspider2 --pages 1-6
+    python3 xzspider2.py -o ./xzdocs/ --pages 1-6

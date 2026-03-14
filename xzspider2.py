@@ -4,6 +4,7 @@ import asyncio
 import binascii
 import logging
 import os
+import random
 import re
 from collections.abc import Awaitable
 from functools import partial
@@ -21,7 +22,7 @@ from bs4.element import AttributeValueList
 from markdownify import MarkdownConverter
 from yarl import URL
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0"
 BASE_URL = URL("https://xz.aliyun.com/api/v2/news/")
@@ -39,6 +40,37 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("XZSpider")
+
+SHUFFLE_TABLE = [
+    7, 4, 32, 14, 18, 36, 27, 34, 26, 38,
+    13, 22, 25, 1, 35, 11, 31, 2, 9, 20,
+    37, 21, 30, 39, 12, 23, 6, 19, 0, 15,
+    5, 8, 33, 28, 29, 16, 3, 10, 17, 24,
+]
+
+# [!navigator, navigator.webdriver, global===window, true, false]
+FLAGS = [False, False, True, True, False]
+
+def _reorder(value: str) -> str:
+    output: list[str] = []
+    for row in range(7):
+        for col in range(6):
+            i = col * 7 + row
+            if i < len(value):
+                output.append(value[i])
+    return "".join(output)
+
+def gen_token(arg1: str) -> str:
+    input40 = str(arg1)[:40]
+    shuffled40 = "".join(input40[index] for index in SHUFFLE_TABLE)
+    token = "1234cf0d46-" + _reorder(shuffled40)
+
+    for f in FLAGS:
+        value = random.randint(0, 127)
+        if (value & 1) != int(f):
+            value += 1
+        token += f"{value:02x}"
+    return token
 
 
 def _parse_url(urlstr: str) -> URL | None:
@@ -70,9 +102,7 @@ class XZSpider:
         )
         self._page_sem = asyncio.Semaphore(page_limit)
         self._news_sem = asyncio.Semaphore(limit)
-        self._image_sem = asyncio.Semaphore(limit * 8)
-        self._cookie_proc_lock = asyncio.Lock()
-        self._cookie_proc: asyncio.subprocess.Process | None = None
+        self._image_sem = asyncio.Semaphore(min(limit * 8, 40))
         self.fetched_index: dict[int, str] = {}
         if not ignore_exists and (index_file or (self.save_path / "index.json").exists()):
             with open(index_file or self.save_path / "index.json", "rb") as f:
@@ -91,47 +121,11 @@ class XZSpider:
                 )
             )
 
-    async def _terminate_cookie_proc(self) -> None:
-        if self._cookie_proc is not None:
-            logger.warning(f"Terminating cookie generator (pid {self._cookie_proc.pid})...")
-            if self._cookie_proc.stdin is not None:
-                self._cookie_proc.stdin.close()
-            self._cookie_proc.terminate()
-            try:
-                await asyncio.wait_for(self._cookie_proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                self._cookie_proc.kill()
-                await self._cookie_proc.wait()
-            finally:
-                self._cookie_proc = None
-
     async def close(self) -> None:
-        await asyncio.gather(self._client.close(), self._terminate_cookie_proc())
+        await self._client.close()
 
     async def _update_cookie(self, arg1: str) -> None:
-        async with self._cookie_proc_lock:
-            if self._cookie_proc is None:
-                self._cookie_proc = await asyncio.create_subprocess_exec(
-                    "node", str(Path(__file__).with_name("adapter.js")),
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                )
-                logger.info(f"Cookie generator started. pid {self._cookie_proc.pid}")
-
-            self._cookie_proc.stdin.write((arg1 + "\n").encode())
-            await self._cookie_proc.stdin.drain()
-            try:
-                line = await asyncio.wait_for(self._cookie_proc.stdout.readline(), timeout=2)
-            except asyncio.TimeoutError:
-                logger.error("Cookie generator timeout")
-                await self._terminate_cookie_proc()
-                return
-
-        cookie = line.decode().strip()
-        if not cookie:
-            logger.error("Empty cookie from cookie generator")
-            return
-        self._client.cookie_jar.update_cookies({"acw_sc__v2": cookie})
+        self._client.cookie_jar.update_cookies({"acw_sc__v2": gen_token(arg1)})
         logger.info(f"Updated acw_sc__v2 cookie.")
 
     async def init_cookie(self) -> None:
@@ -344,7 +338,7 @@ async def main():
         help="Ignore existing items in index.json and re-download all articles"
     )
     parser.add_argument(
-        "--limit", type=int, default=3, help="Maximum concurrent scraping articles (default 3)"
+        "--limit", type=int, default=2, help="Maximum concurrent scraping articles (default 3)"
     )
     parser.add_argument(
         "--page-limit", type=int, default=2, help="Maximum concurrent scraping pages (default 2)"
