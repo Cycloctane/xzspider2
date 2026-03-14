@@ -27,7 +27,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox
 BASE_URL = URL("https://xz.aliyun.com/api/v2/news/")
 
 IMAGE_DATA_RE = re.compile(r"^data:(image/[a-z]{3,4});base64,")
-ARG1_RE = re.compile(rb"^<textarea id=\"renderData\" style=\"display:none\">{\"l1\":\"var arg1='([\da-f]{50})';\"}")
+ARG1_RE = re.compile(rb"\"l1\":\"var arg1='([\da-f]{50})';\"")
 IMAGE_MIME = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp",
     "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg",
@@ -203,7 +203,7 @@ class XZSpider:
                 logger.warning(f"Rate limit exceeded or blocked when fetching article {idx}")
                 return
             body = await resp.read()
-            if m := ARG1_RE.match(body):
+            if m := ARG1_RE.search(body):
                 if not retry:
                     logger.error(f"Failed to fetch article {idx} - invalid cookies")
                     return
