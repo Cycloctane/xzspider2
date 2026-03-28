@@ -4,5 +4,5 @@ beautifulsoup4
 lxml
 markdownify
 orjson
-python-magic
+python-magic-bin
 yarl
