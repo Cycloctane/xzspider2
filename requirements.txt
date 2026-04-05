@@ -4,5 +4,6 @@ beautifulsoup4
 lxml
 markdownify
 orjson
-python-magic
+python-magic ; platform_system != "Windows"
+python-magic-bin ; platform_system == "Windows"
 yarl
