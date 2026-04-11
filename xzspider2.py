@@ -22,7 +22,7 @@ from bs4.element import AttributeValueList
 from markdownify import MarkdownConverter
 from yarl import URL
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0"
 BASE_URL = URL("https://xz.aliyun.com/api/v2/news/")
@@ -216,7 +216,7 @@ class XZSpider:
             return False
 
         title = str(idx) + "." + \
-            json_obj['title'].translate(str.maketrans({c: "_" for c in "\\/:*?\"'<>| "}))
+            json_obj['title'].translate(str.maketrans({c: "_" for c in "\\/:*?\"'<>| \r\n\t"}))
         (self.save_path / title / "img").mkdir(parents=True, exist_ok=True)
 
         soup = BeautifulSoup(json_obj["content"], "lxml")
@@ -320,7 +320,7 @@ def _parse_pages(value: str) -> set[int]:
     return pages
 
 
-async def main():
+async def main(cls: type[XZSpider] = XZSpider):
     import argparse
     parser = argparse.ArgumentParser(description="xz.aliyun.com articles scraper")
     parser.add_argument(
@@ -348,7 +348,7 @@ async def main():
     )
     ns = parser.parse_args()
     pages = _parse_pages(ns.pages)
-    crawler = XZSpider(
+    crawler = cls(
         save_path=ns.output,
         index_file=ns.index_file,
         limit=ns.limit,
